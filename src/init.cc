@@ -2363,6 +2363,11 @@ exit:
   return res;
 fail:
   COMPILER_ATOMIC_STORE(&comm->initState, res, std::memory_order_release);
+  // A failed split/shrink child can be freed before its parent: drop the parent's pointers to its abort flags.
+  if (job->parent && !job->isGrow && job->parent->childAbortFlag == comm->abortFlag) {
+    job->parent->childAbortFlag = NULL;
+    job->parent->childAbortFlagDev = NULL;
+  }
   goto exit;
 }
 
@@ -3440,6 +3445,18 @@ static ncclResult_t commReclaim(struct ncclAsyncJob* job_) {
           ATTN("cleanup comm 0x%" PRIx64 " rank %d failed in destroy/abort, error %d", commHash, curRank, ret);
         }
       }
+    }
+  } else if (comm->bootstrap != NULL && comm->peerInfo == NULL) {
+    // Init stopped in the bootstrap, before the all-gather that gives comm to the other ranks: reclaim it alone.
+    uint64_t commHash = comm->commHash;
+    int rank = comm->rank;
+    NOWARN(ret = commDestroySync(job_), NCCL_DESTROY);
+    if (ret != ncclSuccess) {
+      ATTN("comm 0x%" PRIx64 " rank %d commDestroySync error %d", commHash, rank, ret);
+    }
+    NOWARN(ret = commCleanup(comm), NCCL_DESTROY);
+    if (ret != ncclSuccess) {
+      ATTN("cleanup comm 0x%" PRIx64 " rank %d failed in destroy/abort, error %d", commHash, rank, ret);
     }
   }
 exit:
